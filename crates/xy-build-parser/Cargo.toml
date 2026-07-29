@@ -1,0 +1,8 @@
+[package]
+name = "xy-build-parser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tree-sitter = "0.25.10"
+tree-sitter-xy-build = { path = "../../grammar" }

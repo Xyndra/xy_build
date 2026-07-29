@@ -1,0 +1,15 @@
+project-type: node;
+node-modules:
+    manager: pnpm;
+    // recognized names *must not* use quotes, while arbitrary names *must*
+    "abc": /* just some random version text */ "1.0-abcdef";;
+run:
+    // commands are run
+    "node":
+        command: node;
+        arguments:
+            // arguments are manually listed to later ask for permissions, like accessing outside files
+            file: "./index.js";
+        ;
+    ;
+;

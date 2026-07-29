@@ -1,8 +1,13 @@
+[workspace]
+members = [
+    "crates/xy-build-parser",
+    "crates/xy-build-options",
+    "crates/xy-build-lsp",
+]
+exclude = ["zed-xy-build"]
+resolver = "2"
+
 [package]
 name = "xy_build"
 version = "0.1.0"
 edition = "2024"
-
-[dependencies]
-tree-sitter = "0.26.11"
-tree-sitter-xy-build = { path = "./grammar" }
