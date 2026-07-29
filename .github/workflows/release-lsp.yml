@@ -27,8 +27,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
+      - name: Init grammar submodule
+        run: |
+          git submodule init grammar
+          git submodule update grammar
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
