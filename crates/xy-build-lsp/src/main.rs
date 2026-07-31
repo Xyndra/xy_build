@@ -5,50 +5,144 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use xy_build_options as options;
+use xy_build_options::schema::{Field, FieldKind, ObjSchema, RestKind, OptionSchema};
+use xy_build_options::Config;
 
 struct Backend {
     client: Client,
     docs: Mutex<HashMap<Url, String>>,
-    known_options: HashMap<String, String>,
 }
 
 impl Backend {
     fn new(client: Client) -> Self {
-        let known_options = options::all_options()
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
         Self {
             client,
             docs: Mutex::new(HashMap::new()),
-            known_options,
         }
     }
 
-    fn word_at_position(&self, uri: &Url, position: &Position) -> Option<(String, String)> {
+    fn hover_at_position(&self, uri: &Url, position: &Position) -> Option<(String, String)> {
         let docs = self.docs.lock().ok()?;
         let content = docs.get(uri)?;
         let line = content.lines().nth(position.line as usize)?;
 
-        let start = line[..position.character as usize]
-            .rfind(|c: char| c.is_whitespace() || c == ':' || c == ';' || c == '"')
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let (word, _) = extract_word(line, position.character as usize)?;
+        let field = find_field(Config::schema(), &word)?;
+        Some((word.to_string(), field.doc.to_string()))
+    }
 
-        let end = line[position.character as usize..]
-            .find(|c: char| c.is_whitespace() || c == ':' || c == ';' || c == '"')
-            .map(|i| position.character as usize + i)
-            .unwrap_or(line.len());
+    fn validate(&self, uri: &Url) -> Vec<Diagnostic> {
+        let content = match self.docs.lock() {
+            Ok(docs) => match docs.get(uri) {
+                Some(c) => c.clone(),
+                None => return vec![],
+            },
+            Err(_) => return vec![],
+        };
 
-        if start >= end {
-            return None;
+        let config = match xy_build_parser::parse(&content) {
+            Ok(c) => c,
+            Err(errors) => {
+                return errors.into_iter().map(|e| Diagnostic {
+                    range: Range {
+                        start: Position { line: e.row as u32, character: e.column as u32 },
+                        end: Position { line: e.row as u32, character: e.column as u32 + 1 },
+                    },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    source: Some("xy-build".to_string()),
+                    message: e.message,
+                    ..Default::default()
+                }).collect();
+            }
+        };
+
+        let mut diags = Vec::new();
+        validate_entries(&config.entries, Config::schema(), &mut diags);
+        diags
+    }
+}
+
+fn extract_word(line: &str, col: usize) -> Option<(&str, usize)> {
+    let start = line[..col]
+        .rfind(|c: char| c.is_whitespace() || c == ':' || c == ';' || c == '"')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let end = line[col..]
+        .find(|c: char| c.is_whitespace() || c == ':' || c == ';' || c == '"')
+        .map(|i| col + i)
+        .unwrap_or(line.len());
+    if start >= end {
+        return None;
+    }
+    Some((&line[start..end], start))
+}
+
+fn find_field<'a>(schema: &'a ObjSchema, name: &str) -> Option<&'a Field> {
+    schema.fields.iter().find(|f| f.name == name)
+}
+
+fn validate_entries(entries: &[xy_build_parser::Entry], schema: &ObjSchema, diags: &mut Vec<Diagnostic>) {
+    for entry in entries {
+        let known = schema.fields.iter().find(|f| f.name == entry.key);
+        match known {
+            Some(field) => validate_value(&entry.value, field.kind, entry, diags),
+            None => match schema.rest {
+                Some(rest) => validate_rest_value(&entry.value, rest, entry, diags),
+                None => diags.push(diagnostic(
+                    entry.key_row, entry.key_col,
+                    format!("unknown option '{}'", entry.key),
+                    DiagnosticSeverity::WARNING,
+                )),
+            },
         }
+    }
+}
 
-        let word = &line[start..end];
-        self.known_options
-            .get(word)
-            .map(|docs| (word.to_string(), docs.clone()))
+fn validate_value(value: &xy_build_parser::Value, kind: FieldKind, entry: &xy_build_parser::Entry, diags: &mut Vec<Diagnostic>) {
+    match (value, kind) {
+        (xy_build_parser::Value::Ident(_), FieldKind::Str) => {}
+        (xy_build_parser::Value::Ident(v), FieldKind::Enum(variants)) => {
+            if !variants.contains(&v.as_str()) {
+                diags.push(diagnostic(entry.key_row, entry.key_col, format!("invalid value '{}', expected one of [{}]", v, variants.join(", ")), DiagnosticSeverity::ERROR));
+            }
+        }
+        (xy_build_parser::Value::Ident(_), FieldKind::Object(_)) => {
+            diags.push(diagnostic(entry.key_row, entry.key_col, "expected a block (indented sub-entries)".to_string(), DiagnosticSeverity::ERROR));
+        }
+        (xy_build_parser::Value::Block(_), FieldKind::Str | FieldKind::Enum(_)) => {
+            diags.push(diagnostic(entry.key_row, entry.key_col, "expected a simple value, got a block".to_string(), DiagnosticSeverity::ERROR));
+        }
+        (xy_build_parser::Value::Block(children), FieldKind::Object(sub)) => {
+            validate_entries(children, sub, diags);
+        }
+    }
+}
+
+fn validate_rest_value(value: &xy_build_parser::Value, rest: RestKind, entry: &xy_build_parser::Entry, diags: &mut Vec<Diagnostic>) {
+    match (value, rest) {
+        (xy_build_parser::Value::Ident(_), RestKind::Str) => {}
+        (xy_build_parser::Value::Ident(_), RestKind::Object(_)) => {
+            diags.push(diagnostic(entry.key_row, entry.key_col, "expected a block, got a simple value".to_string(), DiagnosticSeverity::ERROR));
+        }
+        (xy_build_parser::Value::Block(_), RestKind::Str) => {
+            diags.push(diagnostic(entry.key_row, entry.key_col, "expected a simple value, got a block".to_string(), DiagnosticSeverity::ERROR));
+        }
+        (xy_build_parser::Value::Block(children), RestKind::Object(sub)) => {
+            validate_entries(children, sub, diags);
+        }
+    }
+}
+
+fn diagnostic(row: usize, col: usize, message: String, severity: DiagnosticSeverity) -> Diagnostic {
+    Diagnostic {
+        range: Range {
+            start: Position { line: row as u32, character: col as u32 },
+            end: Position { line: row as u32, character: col as u32 + 1 },
+        },
+        severity: Some(severity),
+        source: Some("xy-build".to_string()),
+        message,
+        ..Default::default()
     }
 }
 
@@ -69,7 +163,7 @@ impl LanguageServer for Backend {
             },
             server_info: Some(ServerInfo {
                 name: "xy-build-lsp".to_string(),
-                version: Some("0.1.0".to_string()),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
         })
     }
@@ -88,17 +182,21 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text;
         if let Ok(mut docs) = self.docs.lock() {
-            docs.insert(uri, text);
+            docs.insert(uri.clone(), text);
         }
+        let diags = self.validate(&uri);
+        self.client.publish_diagnostics(uri, diags, None).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         if let Some(change) = params.content_changes.into_iter().last() {
             if let Ok(mut docs) = self.docs.lock() {
-                docs.insert(uri, change.text);
+                docs.insert(uri.clone(), change.text);
             }
         }
+        let diags = self.validate(&uri);
+        self.client.publish_diagnostics(uri, diags, None).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -109,10 +207,7 @@ impl LanguageServer for Backend {
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let pos = params.text_document_position_params;
-        let uri = &pos.text_document.uri;
-        let position = pos.position;
-
-        if let Some((word, docs)) = self.word_at_position(uri, &position) {
+        if let Some((word, docs)) = self.hover_at_position(&pos.text_document.uri, &pos.position) {
             return Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
@@ -121,25 +216,23 @@ impl LanguageServer for Backend {
                 range: None,
             }));
         }
-
         Ok(None)
     }
 
-    async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let mut items: Vec<CompletionItem> = self
-            .known_options
+    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let mut items: Vec<CompletionItem> = Config::schema()
+            .fields
             .iter()
-            .map(|(key, docs)| CompletionItem {
-                label: key.clone(),
+            .map(|field| CompletionItem {
+                label: field.name.to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some(docs.clone()),
-                insert_text: Some(key.clone()),
+                detail: Some(field.doc.to_string()),
+                insert_text: Some(field.name.to_string()),
                 ..Default::default()
             })
             .collect();
 
         items.sort_by(|a, b| a.label.cmp(&b.label));
-
         Ok(Some(CompletionResponse::Array(items)))
     }
 }

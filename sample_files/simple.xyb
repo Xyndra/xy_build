@@ -1,5 +1,5 @@
-project-type: node;
-node-modules:
+project_type: node;
+node_modules:
     manager: pnpm;
     // recognized names *must not* use quotes, while arbitrary names *must*
     "abc": /* just some random version text */ "1.0-abcdef";;

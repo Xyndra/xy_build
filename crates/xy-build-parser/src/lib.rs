@@ -11,6 +11,10 @@ pub enum Value {
 pub struct Entry {
     pub key: String,
     pub value: Value,
+    /// 0-based line of the key in the source.
+    pub key_row: usize,
+    /// 0-based column of the key in the source.
+    pub key_col: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +86,8 @@ fn parse_tree(node: tree_sitter::Node, source: &str) -> ConfigFile {
 fn parse_entry(node: tree_sitter::Node, source: &str) -> Entry {
     let mut key = String::new();
     let mut value = Value::Ident(String::new());
+    let mut key_row = 0;
+    let mut key_col = 0;
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
@@ -89,6 +95,9 @@ fn parse_entry(node: tree_sitter::Node, source: &str) -> Entry {
                 "known_ident" | "unknown_ident" => {
                     if key.is_empty() {
                         key = child_text(child, source);
+                        let pos = child.start_position();
+                        key_row = pos.row;
+                        key_col = pos.column;
                     } else {
                         value = Value::Ident(child_text(child, source));
                     }
@@ -103,7 +112,7 @@ fn parse_entry(node: tree_sitter::Node, source: &str) -> Entry {
         }
     }
 
-    Entry { key, value }
+    Entry { key, value, key_row, key_col }
 }
 
 fn collect_block_entries(node: tree_sitter::Node, source: &str, entries: &mut Vec<Entry>) {
