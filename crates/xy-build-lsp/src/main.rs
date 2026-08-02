@@ -5,9 +5,6 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use xy_build_options::schema::{Field, FieldKind, ObjSchema, RestKind, OptionSchema};
-use xy_build_options::Config;
-
 struct Backend {
     client: Client,
     docs: Mutex<HashMap<Url, String>>,
@@ -43,16 +40,25 @@ impl Backend {
         let config = match xy_build_parser::parse(&content) {
             Ok(c) => c,
             Err(errors) => {
-                return errors.into_iter().map(|e| Diagnostic {
-                    range: Range {
-                        start: Position { line: e.row as u32, character: e.column as u32 },
-                        end: Position { line: e.row as u32, character: e.column as u32 + 1 },
-                    },
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    source: Some("xy-build".to_string()),
-                    message: e.message,
-                    ..Default::default()
-                }).collect();
+                return errors
+                    .into_iter()
+                    .map(|e| Diagnostic {
+                        range: Range {
+                            start: Position {
+                                line: e.row as u32,
+                                character: e.column as u32,
+                            },
+                            end: Position {
+                                line: e.row as u32,
+                                character: e.column as u32 + 1,
+                            },
+                        },
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        source: Some("xy-build".to_string()),
+                        message: e.message,
+                        ..Default::default()
+                    })
+                    .collect();
             }
         };
 
@@ -81,7 +87,11 @@ fn find_field<'a>(schema: &'a ObjSchema, name: &str) -> Option<&'a Field> {
     schema.fields.iter().find(|f| f.name == name)
 }
 
-fn validate_entries(entries: &[xy_build_parser::Entry], schema: &ObjSchema, diags: &mut Vec<Diagnostic>) {
+fn validate_entries(
+    entries: &[xy_build_parser::Entry],
+    schema: &ObjSchema,
+    diags: &mut Vec<Diagnostic>,
+) {
     for entry in entries {
         let known = schema.fields.iter().find(|f| f.name == entry.key);
         match known {
@@ -89,7 +99,8 @@ fn validate_entries(entries: &[xy_build_parser::Entry], schema: &ObjSchema, diag
             None => match schema.rest {
                 Some(rest) => validate_rest_value(&entry.value, rest, entry, diags),
                 None => diags.push(diagnostic(
-                    entry.key_row, entry.key_col,
+                    entry.key_row,
+                    entry.key_col,
                     format!("unknown option '{}'", entry.key),
                     DiagnosticSeverity::WARNING,
                 )),
@@ -98,19 +109,43 @@ fn validate_entries(entries: &[xy_build_parser::Entry], schema: &ObjSchema, diag
     }
 }
 
-fn validate_value(value: &xy_build_parser::Value, kind: FieldKind, entry: &xy_build_parser::Entry, diags: &mut Vec<Diagnostic>) {
+fn validate_value(
+    value: &xy_build_parser::Value,
+    kind: FieldKind,
+    entry: &xy_build_parser::Entry,
+    diags: &mut Vec<Diagnostic>,
+) {
     match (value, kind) {
         (xy_build_parser::Value::Ident(_), FieldKind::Str) => {}
         (xy_build_parser::Value::Ident(v), FieldKind::Enum(variants)) => {
             if !variants.contains(&v.as_str()) {
-                diags.push(diagnostic(entry.key_row, entry.key_col, format!("invalid value '{}', expected one of [{}]", v, variants.join(", ")), DiagnosticSeverity::ERROR));
+                diags.push(diagnostic(
+                    entry.key_row,
+                    entry.key_col,
+                    format!(
+                        "invalid value '{}', expected one of [{}]",
+                        v,
+                        variants.join(", ")
+                    ),
+                    DiagnosticSeverity::ERROR,
+                ));
             }
         }
         (xy_build_parser::Value::Ident(_), FieldKind::Object(_)) => {
-            diags.push(diagnostic(entry.key_row, entry.key_col, "expected a block (indented sub-entries)".to_string(), DiagnosticSeverity::ERROR));
+            diags.push(diagnostic(
+                entry.key_row,
+                entry.key_col,
+                "expected a block (indented sub-entries)".to_string(),
+                DiagnosticSeverity::ERROR,
+            ));
         }
         (xy_build_parser::Value::Block(_), FieldKind::Str | FieldKind::Enum(_)) => {
-            diags.push(diagnostic(entry.key_row, entry.key_col, "expected a simple value, got a block".to_string(), DiagnosticSeverity::ERROR));
+            diags.push(diagnostic(
+                entry.key_row,
+                entry.key_col,
+                "expected a simple value, got a block".to_string(),
+                DiagnosticSeverity::ERROR,
+            ));
         }
         (xy_build_parser::Value::Block(children), FieldKind::Object(sub)) => {
             validate_entries(children, sub, diags);
@@ -118,14 +153,29 @@ fn validate_value(value: &xy_build_parser::Value, kind: FieldKind, entry: &xy_bu
     }
 }
 
-fn validate_rest_value(value: &xy_build_parser::Value, rest: RestKind, entry: &xy_build_parser::Entry, diags: &mut Vec<Diagnostic>) {
+fn validate_rest_value(
+    value: &xy_build_parser::Value,
+    rest: RestKind,
+    entry: &xy_build_parser::Entry,
+    diags: &mut Vec<Diagnostic>,
+) {
     match (value, rest) {
         (xy_build_parser::Value::Ident(_), RestKind::Str) => {}
         (xy_build_parser::Value::Ident(_), RestKind::Object(_)) => {
-            diags.push(diagnostic(entry.key_row, entry.key_col, "expected a block, got a simple value".to_string(), DiagnosticSeverity::ERROR));
+            diags.push(diagnostic(
+                entry.key_row,
+                entry.key_col,
+                "expected a block, got a simple value".to_string(),
+                DiagnosticSeverity::ERROR,
+            ));
         }
         (xy_build_parser::Value::Block(_), RestKind::Str) => {
-            diags.push(diagnostic(entry.key_row, entry.key_col, "expected a simple value, got a block".to_string(), DiagnosticSeverity::ERROR));
+            diags.push(diagnostic(
+                entry.key_row,
+                entry.key_col,
+                "expected a simple value, got a block".to_string(),
+                DiagnosticSeverity::ERROR,
+            ));
         }
         (xy_build_parser::Value::Block(children), RestKind::Object(sub)) => {
             validate_entries(children, sub, diags);
@@ -136,8 +186,14 @@ fn validate_rest_value(value: &xy_build_parser::Value, rest: RestKind, entry: &x
 fn diagnostic(row: usize, col: usize, message: String, severity: DiagnosticSeverity) -> Diagnostic {
     Diagnostic {
         range: Range {
-            start: Position { line: row as u32, character: col as u32 },
-            end: Position { line: row as u32, character: col as u32 + 1 },
+            start: Position {
+                line: row as u32,
+                character: col as u32,
+            },
+            end: Position {
+                line: row as u32,
+                character: col as u32 + 1,
+            },
         },
         severity: Some(severity),
         source: Some("xy-build".to_string()),

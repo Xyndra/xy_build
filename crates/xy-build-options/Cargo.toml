@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 paste = "1"
+xy-build-parser = { path = "../xy-build-parser" }

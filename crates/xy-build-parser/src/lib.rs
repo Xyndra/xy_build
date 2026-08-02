@@ -3,13 +3,27 @@ use tree_sitter_xy_build;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    Ident(String),
+    KnownIdent(String),
+    UnknownIdent(String),
     Block(Vec<Entry>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Key {
+    KnownIdent(String),
+    UnknownIdent(String),
+}
+impl Key {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Key::KnownIdent(s) | Key::UnknownIdent(s) => s.is_empty(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
-    pub key: String,
+    pub key: Key,
     pub value: Value,
     /// 0-based line of the key in the source.
     pub key_row: usize,
@@ -49,7 +63,7 @@ pub fn parse(source: &str) -> Result<ConfigFile, Vec<ParseError>> {
         return Err(errors);
     }
 
-    Ok(parse_tree(tree.root_node(), source))
+    parse_tree(tree.root_node(), source)
 }
 
 fn collect_errors(node: tree_sitter::Node, source: &str, errors: &mut Vec<ParseError>) {
@@ -71,58 +85,84 @@ fn collect_errors(node: tree_sitter::Node, source: &str, errors: &mut Vec<ParseE
     }
 }
 
-fn parse_tree(node: tree_sitter::Node, source: &str) -> ConfigFile {
+fn parse_tree(node: tree_sitter::Node, source: &str) -> Result<ConfigFile, Vec<ParseError>> {
     let mut entries = Vec::new();
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             if child.kind() == "entry" {
-                entries.push(parse_entry(child, source));
+                entries.push(parse_entry(child, source)?);
             }
         }
     }
-    ConfigFile { entries }
+    Ok(ConfigFile { entries })
 }
 
-fn parse_entry(node: tree_sitter::Node, source: &str) -> Entry {
-    let mut key = String::new();
-    let mut value = Value::Ident(String::new());
+fn parse_entry(node: tree_sitter::Node, source: &str) -> Result<Entry, Vec<ParseError>> {
+    let mut key: Option<Key> = None;
+    let mut value: Option<Value> = None;
     let mut key_row = 0;
     let mut key_col = 0;
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             match child.kind() {
+                // I know this could theoretically override itself, but this should be disallowed by tree-sitter (hopefully!)
                 "known_ident" | "unknown_ident" => {
-                    if key.is_empty() {
-                        key = child_text(child, source);
-                        let pos = child.start_position();
-                        key_row = pos.row;
-                        key_col = pos.column;
+                    let pos = child.start_position();
+                    key_row = pos.row;
+                    key_col = pos.column;
+                    if key.as_ref().is_none_or(|k| k.is_empty()) {
+                        if child.kind() == "known_ident" {
+                            key = Some(Key::KnownIdent(child_text(child, source)));
+                        } else {
+                            key = Some(Key::UnknownIdent(child_text(child, source)));
+                        }
                     } else {
-                        value = Value::Ident(child_text(child, source));
+                        if child.kind() == "known_ident" {
+                            value = Some(Value::KnownIdent(child_text(child, source)));
+                        } else {
+                            value = Some(Value::UnknownIdent(child_text(child, source)));
+                        }
                     }
                 }
                 "entry" => {
                     let mut block_entries = Vec::new();
-                    collect_block_entries(child, source, &mut block_entries);
-                    value = Value::Block(block_entries);
+                    collect_block_entries(child, source, &mut block_entries)?;
+                    value = Some(Value::Block(block_entries));
                 }
                 _ => {}
             }
         }
     }
 
-    Entry { key, value, key_row, key_col }
+    if key.is_none() || value.is_none() {
+        return Err(vec![ParseError {
+            message: "entry must have a key and a value".into(),
+            row: key_row,
+            column: key_col,
+        }]);
+    }
+    Ok(Entry {
+        key: key.unwrap(),
+        value: value.unwrap(),
+        key_row,
+        key_col,
+    })
 }
 
-fn collect_block_entries(node: tree_sitter::Node, source: &str, entries: &mut Vec<Entry>) {
+fn collect_block_entries(
+    node: tree_sitter::Node,
+    source: &str,
+    entries: &mut Vec<Entry>,
+) -> Result<(), Vec<ParseError>> {
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             if child.kind() == "entry" {
-                entries.push(parse_entry(child, source));
+                entries.push(parse_entry(child, source)?);
             }
         }
     }
+    Ok(())
 }
 
 fn child_text(node: tree_sitter::Node, source: &str) -> String {
